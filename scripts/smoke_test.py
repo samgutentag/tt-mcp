@@ -63,7 +63,7 @@ def main() -> int:
         [str(python), str(server)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=sys.stderr,   # let the server's own logs show up in our terminal
+        stderr=sys.stderr,  # let the server's own logs show up in our terminal
         text=True,
         bufsize=1,
     )
@@ -72,16 +72,19 @@ def main() -> int:
         # 1. Handshake. Every MCP session starts with `initialize`.
         section("1. initialize handshake")
         running("sending initialize")
-        send(proc, {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "smoke-test", "version": "0.0.0"},
+        send(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "smoke-test", "version": "0.0.0"},
+                },
             },
-        })
+        )
         init = recv(proc)
         print("  initialize →", init.get("result", {}).get("serverInfo"))
 
@@ -115,12 +118,15 @@ def main() -> int:
         # 3. Call list_models.
         section("3. tools/call list_models")
         running("asking the backend what models it serves")
-        send(proc, {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {"name": "list_models", "arguments": {}},
-        })
+        send(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "list_models", "arguments": {}},
+            },
+        )
         result = recv(proc)
         text = result["result"]["content"][0]["text"]
         print(text)
@@ -133,12 +139,15 @@ def main() -> int:
         # 4. Call hardware_info.
         section("4. tools/call hardware_info")
         running("asking what hardware is behind the endpoint")
-        send(proc, {
-            "jsonrpc": "2.0",
-            "id": 4,
-            "method": "tools/call",
-            "params": {"name": "hardware_info", "arguments": {}},
-        })
+        send(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "hardware_info", "arguments": {}},
+            },
+        )
         result = recv(proc)
         text = result["result"]["content"][0]["text"]
         print(text)
@@ -147,15 +156,18 @@ def main() -> int:
         # 5. Call generate. This is the slow one against a cold model.
         section("5. tools/call generate")
         running("sending a prompt (may take several seconds on cold start)")
-        send(proc, {
-            "jsonrpc": "2.0",
-            "id": 5,
-            "method": "tools/call",
-            "params": {
-                "name": "generate",
-                "arguments": {"prompt": "Reply with the single word: pong"},
+        send(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
+                    "name": "generate",
+                    "arguments": {"prompt": "Reply with the single word: pong"},
+                },
             },
-        })
+        )
         result = recv(proc)
         text = result["result"]["content"][0]["text"]
         print(f"  assistant → {text.strip()}")

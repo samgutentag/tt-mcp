@@ -1,11 +1,11 @@
 # tt-mcp
 
 An MCP (Model Context Protocol) server that wraps Tenstorrent inference
-endpoints, so any MCP-compatible agent (Claude Desktop, the MCP Inspector,
-an IDE plugin) can call Tenstorrent hardware as a first-class tool.
-Works against a local Ollama install for development, then flips to a
-hosted Tenstorrent endpoint running `tt-inference-server` by changing a
-single environment variable.
+endpoints, so any MCP-compatible agent (Claude Desktop, the MCP Inspector, an
+IDE plugin) can call Tenstorrent hardware as a first-class tool. Works against a
+local Ollama install for development, then flips to a hosted Tenstorrent
+endpoint running `tt-inference-server` by changing a single environment
+variable.
 
 > Status: v0.1, built as a Tenstorrent DevRel tutorial project by
 > [Sam Gutentag](https://samgutentag.com).
@@ -13,11 +13,10 @@ single environment variable.
 ## Why this exists
 
 Most MCP servers connect agents to databases, SaaS APIs, or filesystems.
-`tt-mcp` connects an agent to **AI accelerator hardware** (Tenstorrent
-hardware behind their hosted vLLM deployments) through the same
-standard protocol. The point is not novelty; it is that a developer who
-already knows how to wire up an MCP tool can now reach real Tenstorrent
-silicon without learning a new SDK.
+`tt-mcp` connects an agent to **AI accelerator hardware** (Tenstorrent hardware
+behind their hosted vLLM deployments) through the same standard protocol. The
+point is not novelty; it is that a developer who already knows how to wire up an
+MCP tool can now reach real Tenstorrent silicon without learning a new SDK.
 
 ## Quickstart
 
@@ -53,13 +52,13 @@ npx @modelcontextprotocol/inspector .venv/bin/python server.py
 | `hardware_info` | Describe the backing hardware and models served. Surfaces `TT_HARDWARE` label and vLLM's `max_model_len`. | (none)                             |
 
 Each tool lives in its own file under `tools/`. `server.py` imports and
-registers them in an explicit list. Adding a new tool is one file plus
-one line in `server.py`.
+registers them in an explicit list. Adding a new tool is one file plus one line
+in `server.py`.
 
 ## Configuration
 
-All runtime config lives in four environment variables, loaded from `.env`
-via `python-dotenv` in local dev or from the orchestrator in production.
+All runtime config lives in four environment variables, loaded from `.env` via
+`python-dotenv` in local dev or from the orchestrator in production.
 
 | Variable      | Default                  | Notes                                                                  |
 | ------------- | ------------------------ | ---------------------------------------------------------------------- |
@@ -79,9 +78,9 @@ via `python-dotenv` in local dev or from the orchestrator in production.
 
 ### Demoing the remote path locally
 
-`scripts/mock_vllm.py` is a zero-dependency mock that speaks vLLM's wire
-format with Tenstorrent-flavored metadata. Use it to exercise the
-OpenAI-compatible code path without access to real hardware.
+`scripts/mock_vllm.py` is a zero-dependency mock that speaks vLLM's wire format
+with Tenstorrent-flavored metadata. Use it to exercise the OpenAI-compatible
+code path without access to real hardware.
 
 ```bash
 # Terminal 1
@@ -95,13 +94,14 @@ TT_HARDWARE="Tenstorrent Wormhole n300 (mock)" \
 python scripts/smoke_test.py
 ```
 
-`hardware_info` will report a 70B model with a 131,072-token context
-window and the `TT_HARDWARE` label. The tt-mcp code is identical to the
-production path; only `TT_ENDPOINT` changes.
+`hardware_info` will report a 70B model with a 131,072-token context window and
+the `TT_HARDWARE` label. The tt-mcp code is identical to the production path;
+only `TT_ENDPOINT` changes.
 
 ## Connecting to Claude Desktop
 
-Add this block to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Add this block to
+`~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -118,33 +118,31 @@ Add this block to `~/Library/Application Support/Claude/claude_desktop_config.js
 }
 ```
 
-Use the `.venv` Python explicitly, because Claude Desktop's environment
-may not have the project's dependencies on its default `python3`.
+Use the `.venv` Python explicitly, because Claude Desktop's environment may not
+have the project's dependencies on its default `python3`.
 
 ## Design notes
 
-The code is intended to be read top-to-bottom as tutorial content. A few
-choices worth calling out:
+The code is intended to be read top-to-bottom as tutorial content. A few choices
+worth calling out:
 
-- **One endpoint, three targets.** The OpenAI-compatible wire format means
-  the same `generate` implementation works against Ollama, vLLM, and
-  Tenstorrent's hosted deployments with no code changes.
-- **The abstraction leaks at `list_models`.** Ollama uses `/api/tags`,
-  vLLM uses `/v1/models`, and the payload shapes differ. That is handled
-  explicitly rather than hidden. See `config.is_ollama` and the branch
-  in `list_models`.
-- **Errors are returned, not raised.** A string response flows through to
-  the calling model, which can reason about the failure. A raised
-  exception becomes an opaque MCP protocol error that the agent cannot
-  recover from cleanly.
-- **Stdout is sacred.** MCP stdio servers must not print anything to
-  stdout that is not a JSON-RPC frame. All diagnostics go through the
-  `logging` module, which writes to stderr.
+- **One endpoint, three targets.** The OpenAI-compatible wire format means the
+  same `generate` implementation works against Ollama, vLLM, and Tenstorrent's
+  hosted deployments with no code changes.
+- **The abstraction leaks at `list_models`.** Ollama uses `/api/tags`, vLLM uses
+  `/v1/models`, and the payload shapes differ. That is handled explicitly rather
+  than hidden. See `config.is_ollama` and the branch in `list_models`.
+- **Errors are returned, not raised.** A string response flows through to the
+  calling model, which can reason about the failure. A raised exception becomes
+  an opaque MCP protocol error that the agent cannot recover from cleanly.
+- **Stdout is sacred.** MCP stdio servers must not print anything to stdout that
+  is not a JSON-RPC frame. All diagnostics go through the `logging` module,
+  which writes to stderr.
 
 ## Companion documents
 
-| File                                                               | Purpose                                                                      |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| [`docs/TUTORIAL.md`](docs/TUTORIAL.md)                             | Long-form walkthrough of every file and design choice.                       |
-| [`docs/PROPOSAL.md`](docs/PROPOSAL.md)                             | One-pager proposing `tt-mcp` as a Tenstorrent ecosystem project.             |
-| [`docs/diagrams/architecture.svg`](docs/diagrams/architecture.svg) | Architecture diagram (agents, `tt-mcp`, backends).                           |
+| File                                                               | Purpose                                                          |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| [`docs/TUTORIAL.md`](docs/TUTORIAL.md)                             | Long-form walkthrough of every file and design choice.           |
+| [`docs/PROPOSAL.md`](docs/PROPOSAL.md)                             | One-pager proposing `tt-mcp` as a Tenstorrent ecosystem project. |
+| [`docs/diagrams/architecture.svg`](docs/diagrams/architecture.svg) | Architecture diagram (agents, `tt-mcp`, backends).               |
