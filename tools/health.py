@@ -66,8 +66,7 @@ def _ollama_placeholder() -> str:
         "  - the endpoint URL for verification\n"
         "\n"
         "To exercise this tool against real hardware, set TT_ENDPOINT to "
-        "the Koyeb URL of your Tenstorrent deployment and restart the "
-        "server."
+        "the Koyeb URL of your Tenstorrent deployment and restart tt-mcp."
     )
 
 

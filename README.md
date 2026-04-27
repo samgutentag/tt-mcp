@@ -103,6 +103,9 @@ only `TT_ENDPOINT` changes.
 Add this block to
 `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
+> Use the `.venv` Python explicitly, because Claude Desktop's environment may
+> not have the project's dependencies on its default `python3`.
+
 ```json
 {
   "mcpServers": {
@@ -118,8 +121,29 @@ Add this block to
 }
 ```
 
-Use the `.venv` Python explicitly, because Claude Desktop's environment may not
-have the project's dependencies on its default `python3`.
+<details>
+<summary>One-liner to generate this with your path filled in (run from inside the repo)</summary>
+
+```bash
+sed "s|/absolute/path/to/tt-mcp|$(pwd)|g" <<'EOF' | pbcopy
+{
+  "mcpServers": {
+    "tt-mcp": {
+      "command": "/absolute/path/to/tt-mcp/.venv/bin/python",
+      "args": ["/absolute/path/to/tt-mcp/server.py"],
+      "env": {
+        "TT_ENDPOINT": "http://localhost:11434",
+        "TT_MODEL": "llama3.2:3b"
+      }
+    }
+  }
+}
+```
+
+The corrected JSON is now on your clipboard. Paste it into
+`~/Library/Application Support/Claude/claude_desktop_config.json`.
+
+</details>
 
 ## Design notes
 
