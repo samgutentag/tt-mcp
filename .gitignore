@@ -6,6 +6,9 @@
 # Local working files and scratch content, not intended for source control
 .local/
 
+# Git worktrees, isolated branches managed by Claude
+.worktrees/
+
 # Python
 .venv/
 __pycache__/
