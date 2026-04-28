@@ -15,6 +15,13 @@ TTFT is omitted on purpose. The OpenAI-compatible non-streaming response
 gives total elapsed time; deriving TTFT from that would be a fabrication.
 When streaming lands as a tool variant, this benchmark gets a meaningful
 TTFT field.
+
+Progress reporting. MCP hosts (Claude Desktop, the Inspector) hold a
+per-tool-call timeout, often as low as 10 seconds. A `n=5` benchmark
+against a real cold-start endpoint blows past that easily. So we accept
+an injected `Context` and emit a progress notification after every
+request. Hosts reset their timeout on each notification, which lets
+benchmarks of any reasonable size finish without tripping the wire.
 """
 
 from __future__ import annotations
@@ -23,7 +30,7 @@ import json
 import time
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from config import config
 from tools._http import DEFAULT_TIMEOUT, format_error
@@ -37,6 +44,7 @@ def register(mcp: FastMCP) -> None:
         n: int = 5,
         prompt: str = "Say hello in one word.",
         max_tokens: int = 8,
+        ctx: Context | None = None,
     ) -> str:
         """Measure end-to-end completion latency over `n` sequential calls.
 
@@ -44,6 +52,13 @@ def register(mcp: FastMCP) -> None:
         concurrency), times each end-to-end, and returns aggregate
         statistics plus a tokens/second estimate based on the `usage`
         block in each response.
+
+        Streams progress notifications to the host between calls (when an
+        MCP `Context` is available), which is what keeps the host's
+        per-tool-call timeout from tripping on `n>1` runs against a real
+        cold-start endpoint. The notification carries the per-call
+        elapsed time so an operator watching the progress bar sees real
+        numbers, not just a counter.
 
         Args:
             n: Number of requests. Default 5, enough for stable p50/p95
@@ -79,9 +94,15 @@ def register(mcp: FastMCP) -> None:
         tokens_generated = 0
         errors = 0
 
+        # Initial progress so the host UI animates from zero immediately.
+        # Hosts that ignore progress notifications won't care; those that
+        # honour them get a snappy "the tool is alive" signal before the
+        # first request lands.
+        await _progress(ctx, 0, n, "warming up")
+
         try:
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-                for _ in range(n):
+                for i in range(n):
                     t0 = time.perf_counter()
                     try:
                         response = await client.post(
@@ -98,10 +119,16 @@ def register(mcp: FastMCP) -> None:
                                 detail=str(exc),
                             )
                         errors += 1
+                        await _progress(
+                            ctx, i + 1, n, f"call {i + 1}/{n}: error ({type(exc).__name__})"
+                        )
                         continue
 
                     if response.status_code >= 400:
                         errors += 1
+                        await _progress(
+                            ctx, i + 1, n, f"call {i + 1}/{n}: HTTP {response.status_code}"
+                        )
                         continue
 
                     timings_ms.append(elapsed_ms)
@@ -115,6 +142,10 @@ def register(mcp: FastMCP) -> None:
                         # the timing (the path *did* work) but not the
                         # tokens, and don't penalise the call as an error.
                         pass
+
+                    await _progress(
+                        ctx, i + 1, n, f"call {i + 1}/{n}: {elapsed_ms:.0f} ms"
+                    )
         except httpx.ConnectError as exc:
             return format_error(f"Could not reach {config.endpoint}.", detail=str(exc))
 
@@ -161,6 +192,24 @@ def _quantile(sorted_values: list[float], q: float) -> float:
     if lo + 1 >= len(sorted_values):
         return sorted_values[lo]
     return sorted_values[lo] + frac * (sorted_values[lo + 1] - sorted_values[lo])
+
+
+async def _progress(ctx: Context | None, progress: int, total: int, message: str) -> None:
+    """Fire a progress notification, swallowing errors.
+
+    No-op when the host did not inject a Context (subprocess smoke tests
+    and some non-host callers). When a Context is present, we still wrap
+    the call: a host that disconnects mid-benchmark would otherwise raise
+    here and abort a perfectly valid measurement run. The benchmark's
+    job is to return numbers, not to complain about the wire.
+    """
+    if ctx is None:
+        return
+    try:
+        await ctx.report_progress(progress=progress, total=total, message=message)
+    except Exception:
+        # Telemetry is best-effort, never load-bearing.
+        pass
 
 
 def _tokens_per_sec(tokens: int, timings_ms: list[float]) -> float | None:
