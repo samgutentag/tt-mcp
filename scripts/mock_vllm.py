@@ -54,6 +54,61 @@ MOCK_MODELS = [
 # this through `hardware_info` once the operator sets TT_HARDWARE to match.
 MOCK_HARDWARE = "Tenstorrent Wormhole n300"
 
+# Static Prometheus exposition. Numbers are deliberately fixed so the smoke
+# test is deterministic, the goal here is wire-format realism, not a
+# simulation of a live workload. Histogram bucket boundaries match what vLLM
+# emits in the wild (one of the few places we mirror real values; an agent
+# computing p95 needs the buckets to be plausible).
+MOCK_METRICS = """\
+# HELP vllm:num_requests_running Number of requests currently running.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running 2.0
+# HELP vllm:num_requests_waiting Number of requests waiting in the queue.
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting 0.0
+# HELP vllm:gpu_cache_usage_perc KV cache usage as a fraction.
+# TYPE vllm:gpu_cache_usage_perc gauge
+vllm:gpu_cache_usage_perc 0.42
+# HELP vllm:gpu_prefix_cache_hit_rate Prefix cache hit rate.
+# TYPE vllm:gpu_prefix_cache_hit_rate gauge
+vllm:gpu_prefix_cache_hit_rate 0.61
+# HELP vllm:num_preemptions_total Cumulative request preemptions.
+# TYPE vllm:num_preemptions_total counter
+vllm:num_preemptions_total 3.0
+# HELP vllm:prompt_tokens_total Total prompt tokens processed.
+# TYPE vllm:prompt_tokens_total counter
+vllm:prompt_tokens_total 184320.0
+# HELP vllm:generation_tokens_total Total generated tokens.
+# TYPE vllm:generation_tokens_total counter
+vllm:generation_tokens_total 41216.0
+# HELP vllm:time_to_first_token_seconds Histogram of TTFT in seconds.
+# TYPE vllm:time_to_first_token_seconds histogram
+vllm:time_to_first_token_seconds_bucket{le="0.05"} 12.0
+vllm:time_to_first_token_seconds_bucket{le="0.1"} 38.0
+vllm:time_to_first_token_seconds_bucket{le="0.2"} 71.0
+vllm:time_to_first_token_seconds_bucket{le="0.5"} 88.0
+vllm:time_to_first_token_seconds_bucket{le="1.0"} 95.0
+vllm:time_to_first_token_seconds_bucket{le="2.5"} 98.0
+vllm:time_to_first_token_seconds_bucket{le="+Inf"} 100.0
+vllm:time_to_first_token_seconds_count 100.0
+vllm:time_to_first_token_seconds_sum 14.7
+# HELP vllm:e2e_request_latency_seconds Histogram of end-to-end latency.
+# TYPE vllm:e2e_request_latency_seconds histogram
+vllm:e2e_request_latency_seconds_bucket{le="0.5"} 18.0
+vllm:e2e_request_latency_seconds_bucket{le="1.0"} 47.0
+vllm:e2e_request_latency_seconds_bucket{le="2.5"} 82.0
+vllm:e2e_request_latency_seconds_bucket{le="5.0"} 95.0
+vllm:e2e_request_latency_seconds_bucket{le="10.0"} 99.0
+vllm:e2e_request_latency_seconds_bucket{le="+Inf"} 100.0
+vllm:e2e_request_latency_seconds_count 100.0
+vllm:e2e_request_latency_seconds_sum 168.4
+"""
+
+# Mock vLLM version. Real vLLM exposes this via `/version` so an operator
+# can match metric names to the right vLLM minor (the metric namespace has
+# shifted across releases).
+MOCK_VERSION = "0.6.x-mock"
+
 
 class MockHandler(BaseHTTPRequestHandler):
     """Tiny OpenAI-compatible responder. Implements only what tt-mcp calls."""
@@ -62,6 +117,13 @@ class MockHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/v1/models":
             self._json(200, {"object": "list", "data": MOCK_MODELS})
+        elif self.path == "/metrics":
+            self._text(200, MOCK_METRICS, content_type="text/plain; version=0.0.4")
+        elif self.path == "/health":
+            # vLLM's /health returns 200 with an empty body when ready.
+            self._raw(200, b"", content_type="text/plain")
+        elif self.path == "/version":
+            self._json(200, {"version": MOCK_VERSION})
         else:
             self._json(404, {"error": {"message": f"unknown route {self.path}"}})
 
@@ -121,12 +183,18 @@ class MockHandler(BaseHTTPRequestHandler):
 
     # --- helpers -------------------------------------------------------
     def _json(self, status: int, obj: dict) -> None:
-        data = json.dumps(obj).encode("utf-8")
+        self._raw(status, json.dumps(obj).encode("utf-8"), content_type="application/json")
+
+    def _text(self, status: int, body: str, *, content_type: str) -> None:
+        self._raw(status, body.encode("utf-8"), content_type=content_type)
+
+    def _raw(self, status: int, body: bytes, *, content_type: str) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(data)
+        if body:
+            self.wfile.write(body)
 
     def log_message(self, fmt: str, *args) -> None:
         # Route access logs to stderr with a prefix so they never collide

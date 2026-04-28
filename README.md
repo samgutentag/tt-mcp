@@ -45,11 +45,13 @@ npx @modelcontextprotocol/inspector .venv/bin/python server.py
 
 ## Tools
 
-| Tool            | Purpose                                                                                                   | Inputs                             |
-| --------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| `generate`      | Send a prompt, get a completion. Uses OpenAI-compatible `/v1/chat/completions`.                           | `prompt: string`, `model?: string` |
-| `list_models`   | List available models. Branches on backend: `/api/tags` for Ollama, `/v1/models` for vLLM/Tenstorrent.    | (none)                             |
-| `hardware_info` | Describe the backing hardware and models served. Surfaces `TT_HARDWARE` label and vLLM's `max_model_len`. | (none)                             |
+| Tool            | Purpose                                                                                                                         | Inputs                                                          |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `generate`      | Send a prompt, get a completion. Uses OpenAI-compatible `/v1/chat/completions`.                                                 | `prompt: string`, `model?: string`                              |
+| `list_models`   | List available models. Branches on backend: `/api/tags` for Ollama, `/v1/models` for vLLM/Tenstorrent.                          | (none)                                                          |
+| `hardware_info` | Static spec × live state × server. Merges the hardware catalog, parsed `/metrics`, and `/version` into one dict with a `sources` ledger. | (none)                                                          |
+| `metrics`       | Raw vLLM Prometheus state, parsed. Returns the full `vllm:*` family as JSON; histograms come back as `{buckets, count, sum}`.   | (none)                                                          |
+| `benchmark`     | Sequential end-to-end completion timing. Returns min/max/p50/p95 latency and an averaged tokens/second.                          | `n?: int=5`, `prompt?: string`, `max_tokens?: int=8`            |
 
 Each tool lives in its own file under `tools/`. `server.py` imports and
 registers them in an explicit list. Adding a new tool is one file plus one line
@@ -90,12 +92,24 @@ python scripts/mock_vllm.py                          # listens on :8000
 TT_ENDPOINT=http://127.0.0.1:8000 \
 TT_API_KEY=mock-key \
 TT_MODEL="meta-llama/Llama-3.1-70B-Instruct" \
-TT_HARDWARE="Tenstorrent Wormhole n300 (mock)" \
+TT_HARDWARE="Tenstorrent n300" \
 python scripts/smoke_test.py
 ```
 
-`hardware_info` will report a 70B model with a 131,072-token context window and
-the `TT_HARDWARE` label. The tt-mcp code is identical to the production path;
+The mock implements the routes every tool needs:
+
+| Route                     | Used by                              | Behaviour                                              |
+| ------------------------- | ------------------------------------ | ------------------------------------------------------ |
+| `GET /v1/models`          | `list_models`, `hardware_info`       | Returns one 70B model with `max_model_len: 131072`.    |
+| `POST /v1/chat/completions` | `generate`, `benchmark`            | Returns an obvious mock completion, OpenAI-shaped.     |
+| `GET /metrics`            | `metrics`, `hardware_info`           | Static Prometheus exposition (gauges + histograms).    |
+| `GET /health`             | `hardware_info`                      | 200 with empty body (vLLM's ready signal).             |
+| `GET /version`            | `hardware_info`                      | `{"version": "0.6.x-mock"}`.                           |
+
+Numbers in `/metrics` are deliberately fixed so the smoke test is deterministic.
+`hardware_info` will report all sources as `"ok"`, the `n300` catalog entry,
+the model and context window, and live numbers like `kv_cache_usage: 0.42` and
+`p95_e2e_latency_s: 5.0`. The tt-mcp code is identical to the production path;
 only `TT_ENDPOINT` changes.
 
 ## Connecting to Claude Desktop
@@ -162,6 +176,52 @@ worth calling out:
 - **Stdout is sacred.** MCP stdio servers must not print anything to stdout that
   is not a JSON-RPC frame. All diagnostics go through the `logging` module,
   which writes to stderr.
+
+### Hardware-aware mode
+
+`hardware_info` doesn't query a single endpoint; it merges three signals so an
+agent gets a real picture of the box in one call:
+
+- **Static spec** from `tools/hw_catalog.py`. Hardcoded silicon facts (chip
+  family, DRAM, Tensix cores) keyed by exact match on `TT_HARDWARE`. The
+  catalog is intentionally cautious, anything not on a primary source is
+  `None` with a `# TODO verify` comment. A wrong TFLOPS number is worse than
+  no TFLOPS number, an agent will reason from it.
+- **Live state** from `/metrics`. KV cache utilisation, queue depth,
+  preemption count, p95 latency, lifetime token counts. Parsed by
+  `tools/_metrics.py`, which also provides a Prometheus-compatible
+  `histogram_quantile`.
+- **Server identity** from `/version` and `/v1/models`. vLLM minor and the
+  models being served, with their context windows.
+
+Every fetch is wrapped, so one failing source doesn't kill the others. The
+response carries a `sources` ledger telling the caller who answered and who
+didn't:
+
+```json
+"sources": {
+  "health": "ok",
+  "version": "ok",
+  "models": "ok",
+  "metrics": "failed: HTTP 503"
+}
+```
+
+Partial failure is a first-class state. An agent that sees `metrics` is down
+but `models` came through can still reason about what to do next, and won't
+silently treat a missing `kv_cache_usage` as "unknown" when the real cause is
+"the source was unreachable".
+
+Two tools, two audiences:
+
+- `metrics` is uncooked. Full `vllm:*` family, parsed but not interpreted.
+  For agents that want to do their own analysis or cherry-pick gauges.
+- `hardware_info` is plated. Hand-picked signals with short human-readable
+  names (`running_requests`, not `vllm:num_requests_running`) merged with
+  the static catalog and server version.
+
+Don't make the agent choose between "raw numbers" and "interpretation", give
+it both, separately.
 
 ## Companion documents
 

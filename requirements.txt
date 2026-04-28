@@ -13,6 +13,7 @@ idna==3.12
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 mcp==1.27.0
+prometheus-client==0.25.0
 pycparser==3.0
 pydantic==2.13.3
 pydantic-settings==2.14.0

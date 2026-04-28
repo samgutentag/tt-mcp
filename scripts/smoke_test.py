@@ -103,6 +103,8 @@ def main() -> int:
             "generate",
             "list_models",
             "hardware_info",
+            "metrics",
+            "benchmark",
         }, f"unexpected: {names}"
 
         # Assert every tool shipped a non-empty description. Day 1 had a
@@ -136,7 +138,9 @@ def main() -> int:
         # different models.
         assert " - " in text, "expected at least one model listed"
 
-        # 4. Call hardware_info.
+        # 4. Call hardware_info. Returns a structured dict; FastMCP serialises
+        #    it to a text JSON block in `content[0].text` and additionally
+        #    surfaces the parsed dict as `structuredContent`.
         section("4. tools/call hardware_info")
         running("asking what hardware is behind the endpoint")
         send(
@@ -149,18 +153,58 @@ def main() -> int:
             },
         )
         result = recv(proc)
-        text = result["result"]["content"][0]["text"]
+        body = result["result"]
+        text = body["content"][0]["text"]
         print(text)
         assert text.strip(), "hardware_info returned empty"
+        # The merged shape has a sources ledger so an agent knows which
+        # signals to trust. Confirm the field is present (against the mock,
+        # every source should answer "ok").
+        assert '"sources"' in text, "hardware_info missing sources ledger"
 
-        # 5. Call generate. This is the slow one against a cold model.
-        section("5. tools/call generate")
-        running("sending a prompt (may take several seconds on cold start)")
+        # 5. Call metrics. Smallest tool, wraps /metrics through the parser.
+        section("5. tools/call metrics")
+        running("fetching parsed Prometheus state")
         send(
             proc,
             {
                 "jsonrpc": "2.0",
                 "id": 5,
+                "method": "tools/call",
+                "params": {"name": "metrics", "arguments": {}},
+            },
+        )
+        result = recv(proc)
+        text = result["result"]["content"][0]["text"]
+        # Print first 12 lines so the demo output stays scannable.
+        print("\n".join(text.splitlines()[:12]) + "\n  ...")
+        assert "vllm:num_requests_running" in text, "metrics missing core gauges"
+
+        # 6. Call benchmark with n=3 to keep wall-time short.
+        section("6. tools/call benchmark (n=3)")
+        running("running 3 sequential completion calls and timing them")
+        send(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {"name": "benchmark", "arguments": {"n": 3}},
+            },
+        )
+        result = recv(proc)
+        text = result["result"]["content"][0]["text"]
+        print(text)
+        assert '"errors": 0' in text, "benchmark reported errors against mock"
+
+        # 7. Call generate. This is the slow one against a cold model.
+        section("7. tools/call generate")
+        running("sending a prompt (may take several seconds on cold start)")
+        send(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
                 "method": "tools/call",
                 "params": {
                     "name": "generate",

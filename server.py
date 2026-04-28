@@ -33,7 +33,7 @@ import sys
 from mcp.server.fastmcp import FastMCP
 
 from config import config
-from tools import generate, health, models
+from tools import benchmark, generate, hardware_info, metrics, models
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,8 +47,10 @@ mcp = FastMCP(
     instructions=(
         "Tools for calling a Tenstorrent (or OpenAI-compatible) inference "
         "endpoint. Use `generate` for text completions, `list_models` to "
-        "see what models the backend has available, and `hardware_info` "
-        "to learn what hardware is serving the requests."
+        "see what models the backend has available, `hardware_info` for "
+        "merged static x live x server detail about the box, `metrics` "
+        "for the raw vLLM Prometheus state, and `benchmark` to measure "
+        "end-to-end completion latency."
     ),
 )
 
@@ -56,7 +58,9 @@ mcp = FastMCP(
 # add a new tool.
 generate.register(mcp)
 models.register(mcp)
-health.register(mcp)
+hardware_info.register(mcp)
+metrics.register(mcp)
+benchmark.register(mcp)
 
 
 if __name__ == "__main__":
