@@ -26,7 +26,6 @@ benchmarks of any reasonable size finish without tripping the wire.
 
 from __future__ import annotations
 
-import json
 import time
 
 import httpx
@@ -45,7 +44,7 @@ def register(mcp: FastMCP) -> None:
         prompt: str = "Say hello in one word.",
         max_tokens: int = 8,
         ctx: Context | None = None,
-    ) -> str:
+    ) -> dict:
         """Measure end-to-end completion latency over `n` sequential calls.
 
         Fires `n` `/v1/chat/completions` requests one after another (no
@@ -71,16 +70,18 @@ def register(mcp: FastMCP) -> None:
                 generation throughput on a long completion.
 
         Returns:
-            A JSON-encoded dict with per-call timings (`min`, `max`, p50,
-            p95), total tokens generated, an averaged `tokens_per_sec`,
-            and an `errors` count for non-2xx or malformed responses.
-            The `note` field warns callers not to read this as a load
-            test, agents have a habit of over-claiming.
+            A dict with per-call timings (`min`, `max`, p50, p95), total
+            tokens generated, an averaged `tokens_per_sec`, and an
+            `errors` count for non-2xx or malformed responses. The `note`
+            field warns callers not to read this as a load test, agents
+            have a habit of over-claiming. On input validation failure or
+            "all calls failed" cases, an `error` field is set and the
+            timing fields are absent.
         """
         if n < 1:
-            return format_error("benchmark requires n >= 1.")
+            return _failure("benchmark requires n >= 1.", n=n)
         if max_tokens < 1:
-            return format_error("benchmark requires max_tokens >= 1.")
+            return _failure("benchmark requires max_tokens >= 1.", n=n)
 
         url = f"{config.endpoint}/v1/chat/completions"
         payload = {
@@ -114,8 +115,9 @@ def register(mcp: FastMCP) -> None:
                         # it loudly so the user fixes the endpoint, not
                         # the benchmark args.
                         if not timings_ms:
-                            return format_error(
+                            return _failure(
                                 f"Could not reach {config.endpoint}.",
+                                n=n,
                                 detail=str(exc),
                             )
                         errors += 1
@@ -147,25 +149,28 @@ def register(mcp: FastMCP) -> None:
                         ctx, i + 1, n, f"call {i + 1}/{n}: {elapsed_ms:.0f} ms"
                     )
         except httpx.ConnectError as exc:
-            return format_error(f"Could not reach {config.endpoint}.", detail=str(exc))
+            return _failure(
+                f"Could not reach {config.endpoint}.", n=n, errors=errors, detail=str(exc)
+            )
 
         if not timings_ms:
-            return format_error(
+            return _failure(
                 f"All {n} benchmark calls failed.",
+                n=n,
+                errors=errors,
                 detail=f"errors={errors}",
             )
 
-        result = {
-            "n": n,
-            "model": config.model,
+        return {
             "endpoint": config.endpoint,
+            "model": config.model,
+            "n": n,
             "e2e_ms": _summarise(timings_ms),
             "tokens_generated_total": tokens_generated,
             "tokens_per_sec": _tokens_per_sec(tokens_generated, timings_ms),
             "errors": errors,
             "note": "sequential; not a load test",
         }
-        return json.dumps(result, indent=2)
 
 
 def _summarise(values_ms: list[float]) -> dict[str, float]:
@@ -192,6 +197,25 @@ def _quantile(sorted_values: list[float], q: float) -> float:
     if lo + 1 >= len(sorted_values):
         return sorted_values[lo]
     return sorted_values[lo] + frac * (sorted_values[lo + 1] - sorted_values[lo])
+
+
+def _failure(message: str, *, n: int, errors: int = 0, detail: str | None = None) -> dict:
+    """Build a uniform failure-shaped response.
+
+    Mirrors the `list_models` and `metrics` partial-failure pattern. The
+    wire shape stays stable across success and failure with an embedded
+    `error` string instead of a different return type, which keeps MCP
+    hosts that compare text vs structured content from flagging a
+    mismatch. `format_error` still hits stderr the same way it did when
+    this tool returned strings, the operator-facing log line matters.
+    """
+    return {
+        "endpoint": config.endpoint,
+        "model": config.model,
+        "n": n,
+        "errors": errors,
+        "error": format_error(message, detail=detail),
+    }
 
 
 async def _progress(ctx: Context | None, progress: int, total: int, message: str) -> None:
