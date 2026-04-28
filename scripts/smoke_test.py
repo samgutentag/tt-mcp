@@ -130,11 +130,13 @@ def main() -> int:
         result = recv(proc)
         text = result["result"]["content"][0]["text"]
         print(text)
-        # Backend-agnostic assertion: any response that names at least
-        # one model is acceptable. The smoke test runs against Ollama,
-        # the mock vLLM, or a real hosted deployment; each names
-        # different models.
-        assert " - " in text, "expected at least one model listed"
+        # `list_models` returns a dict; FastMCP serialises it as JSON in
+        # `content[0].text`. Confirm the structured shape and that at
+        # least one model came back. Backend-agnostic, the smoke test
+        # runs against Ollama, the mock, or a real hosted deployment,
+        # each names different models.
+        body = json.loads(text)
+        assert body.get("models"), f"list_models returned no models: {body}"
 
         # 4. Call hardware_info.
         section("4. tools/call hardware_info")
