@@ -325,7 +325,7 @@ look cleaner in the file tree, but it moves the divergence from one file to
 three, and makes the tutorial read as a framework rather than a tool. In a
 teaching codebase the branch is the better call.
 
-### `tools/health.py`
+### `tools/hardware_info.py`
 
 This tool answers "what is actually serving these tokens?" which matters the
 moment an agent starts choosing between cheap local inference and real
@@ -336,25 +336,30 @@ The tool branches:
 - Against Ollama it returns a teaching placeholder that explains what the tool
   would show against real hardware and how to point the server there. That is
   more useful than pretending, and an agent can still reason about the response.
-- Against a vLLM endpoint it calls `/v1/models` and surfaces each model's
-  `max_model_len` (the vLLM-specific max context length) along with the
-  `TT_HARDWARE` label the operator sets.
+- Against a vLLM endpoint it merges three signals (a static spec catalog,
+  parsed `/metrics`, and `/version` plus `/v1/models`) into one response with
+  a `sources` ledger so the agent knows which signals to trust. Part 6 walks
+  through how that merge is built.
 
 `TT_HARDWARE` being operator-declared rather than probed is a deliberate
 honesty. vLLM's OpenAI-compatible routes do not expose hardware telemetry.
-Rather than invent a label, the tool states what it knows and what it does not.
+Rather than invent a label, the tool states what it knows, fills in what it
+can from the static catalog, and lets the response carry partial-failure
+information when a source is down.
 
 ### `server.py`
 
 The entry point. Four responsibilities: configure logging to stderr, build the
-FastMCP instance, register the three tool modules, and run.
+FastMCP instance, register every tool module, and run.
 
 ```python
 mcp = FastMCP(name="tt-mcp", instructions="...")
 
 generate.register(mcp)
 models.register(mcp)
-health.register(mcp)
+hardware_info.register(mcp)
+metrics.register(mcp)
+benchmark.register(mcp)
 
 if __name__ == "__main__":
     mcp.run()
@@ -363,16 +368,17 @@ if __name__ == "__main__":
 That explicit `register(mcp)` sequence is the design decision I would defend
 most firmly. It is slightly more code than decorator-based auto-discovery, and
 the payoff is that "which tools does this build expose?" is a one-file question
-with a three-line answer.
+with a five-line answer.
 
 > For a tutorial codebase I will take explicit over clever every time.
 
-### Adding a fourth tool
+### Adding a sixth tool
 
-The `register(mcp)` pattern earns its keep the first time you add a new tool:
-two edits and you are done. Create a new file under `tools/` that exports
+The `register(mcp)` pattern earns its keep every time you add a new tool: two
+edits and you are done. Create a new file under `tools/` that exports
 `register(mcp)`, then add one line to `server.py`. No registry, no loader, no
-plugin hook.
+plugin hook. Going from three tools to five (adding `metrics` and `benchmark`,
+and pulling `hardware_info` out of its old shared file) was three new lines.
 
 ---
 
@@ -524,7 +530,125 @@ each of them.
 
 ---
 
-## Part 6: A proposal
+## Part 6: Hardware-aware mode
+
+`hardware_info` in v0.1 returned a label and a context window. Useful, but
+thin. An agent calling it learned that the box was a "Tenstorrent n300" and
+that the served model accepts 131,072 tokens of context, and that was it. The
+agent could not answer "is the box busy?", "how fast is it actually going?",
+or "what's the silicon physically capable of?" without writing more code.
+
+v0.2 fixes that with a three-source merge: a static spec catalog, the live
+Prometheus state from `/metrics`, and the server identity from `/version` and
+`/v1/models`. Three new files do the work, and the existing `hardware_info`
+implementation is replaced with one that fans out to all four sources at once.
+
+### `tools/_metrics.py`: the parser
+
+The leading underscore is a convention: nothing outside the `tools/` package
+imports from it. Two functions:
+
+```python
+def parse_prometheus(text: str) -> dict[str, Any]: ...
+def histogram_quantile(hist: dict, q: float) -> float | None: ...
+```
+
+The first flattens Prometheus exposition format to a dict. Counters and gauges
+become floats (or `{label-set: float}` maps when there are labels). Histograms
+get reassembled into `{"buckets": [(le, count), ...], "count": ..., "sum": ...}`,
+which is the shape a quantile estimator wants.
+
+The non-obvious part is the parser library's name normalisation.
+`prometheus_client.parser.text_string_to_metric_families` is helpful enough
+to strip the `_total` suffix from a counter's _family_ name, while keeping it
+on the actual sample. So `vllm:prompt_tokens_total` arrives as a family named
+`vllm:prompt_tokens` containing one sample named `vllm:prompt_tokens_total`.
+If you key the output dict on family names you lose the suffix, and an agent
+that knows the metric exists on the wire as `vllm:prompt_tokens_total` won't
+find it. The parser keys on sample names instead, so what goes in comes out.
+
+The second function reproduces Prometheus's own `histogram_quantile`: walk
+the cumulative buckets until you cross the target percentile, then linearly
+interpolate inside that bucket. Two edge cases worth calling out:
+
+- **Empty histogram.** A fresh server hasn't observed anything yet, so
+  `count` is zero. Return `None` rather than dividing by zero. Callers
+  unwrap with `if p95 is not None` (in real code) or pass `None` straight
+  through to the agent (in `hardware_info`'s response).
+- **Target lands in the `+Inf` bucket.** The histogram has no upper bound
+  to interpolate against. Return the last finite bucket boundary, which
+  is what Prometheus does; it's a known approximation, not a bug.
+
+Both functions are pure, so the file ships a `__main__` block that feeds a
+known-good blob through them and asserts the parsed shape. Run it with
+`python -m tools._metrics` and you should see `ok: parse_prometheus +
+histogram_quantile self-test passed`.
+
+### `tools/hw_catalog.py`: the static spec
+
+A module-level dict keyed by the exact string an operator puts in the
+`TT_HARDWARE` env var. Nine seeded entries covering n150, n300, p100, p150,
+the Wormhole and Blackhole LoudBox / QuietBox systems, and the Wormhole
+Galaxy. Each entry holds chip family, chip count, Tensix core count, DRAM
+size and type, peak BF16 TFLOPS, TDP, form factor, interconnect, and a
+`source` URL pointing at the page where the values were read.
+
+Two design choices worth their weight:
+
+- **Hardcoded, not fetched.** A live spec lookup over the network adds a
+  hop and a failure mode for information that essentially does not change.
+  The silicon doesn't move; embedding what we know lets `hardware_info`
+  answer in one round trip.
+- **`None` over guessing.** Every numeric field is either confirmed against
+  tenstorrent.com/hardware (or a linked spec sheet) or marked `None` with
+  a `# TODO verify` comment. A wrong TFLOPS number is worse than no TFLOPS
+  number, an agent will reason from it. Misses on the lookup return
+  `{"unknown": True, "label": <value>}` so an unrecognised box still gets
+  a useful payload, the agent learns the operator's declared label even
+  if the catalog doesn't.
+
+### `tools/hardware_info.py`: the merge
+
+The new `hardware_info` fans out to four endpoints (`/health`, `/version`,
+`/v1/models`, `/metrics`) in turn. Each fetch is wrapped, so a failing
+source doesn't kill the others. The response carries a `sources` ledger
+telling the agent who answered and who didn't:
+
+```json
+{
+  "endpoint": "https://...",
+  "hardware": {"label": "Tenstorrent n300", "chip_family": "Wormhole", ...},
+  "server":   {"version": "0.6.x"},
+  "models":   [{"id": "meta-llama/Llama-3.1-70B-Instruct", "max_model_len": 131072}],
+  "live": {
+    "running_requests": 2.0,
+    "kv_cache_usage": 0.42,
+    "p95_e2e_latency_s": 5.0,
+    "preemptions_total": 3.0,
+    ...
+  },
+  "sources": {"health": "ok", "version": "ok", "models": "ok", "metrics": "ok"}
+}
+```
+
+The `live` block is hand-picked: short human-readable names, only the
+signals worth foregrounding. An agent that wants the full `vllm:*`
+namespace calls the `metrics` tool instead, which returns the parsed dict
+without the editorialising. Two tools, two audiences: don't make the agent
+choose between raw numbers and interpretation, give it both, separately.
+
+### Why this is the differentiator
+
+Every other "list models" MCP wrapper stops at the first column. The
+combination, **static spec × live state × measured throughput** (with
+`benchmark` covering the measured part), is what makes this server worth
+using over a few lines of OpenAI client code. The agent can answer not
+just "what is this box?" but "is it saturated?", "has it been thrashing?",
+and "how fast is it actually going right now?" through one tool call each.
+
+---
+
+## Part 7: A proposal
 
 The point of this project is not the code. It is the developer experience it
 improves for both humans and agents, and the question of whether Tenstorrent
@@ -540,12 +664,15 @@ contribution:
   developer-in-an-agent.
 - A local-first story that does not require hardware access to onboard, with a
   clean seam for production.
-- A small enough surface (three tools, three env vars, under 400 lines of Python
-  including comments) that a developer can read it top to bottom before deciding
-  whether to adopt it.
+- A small enough surface (five tools, four env vars, a single mock backend
+  file) that a developer can read it top to bottom before deciding whether to
+  adopt it.
 
-A v1.0 would add streaming, authentication beyond bearer tokens, a real hardware
-probe, and a discovery mechanism for operators who run more than one endpoint.
+A v1.0 would add streaming (which unlocks real time-to-first-token measurement
+in `benchmark`), authentication beyond bearer tokens, a discovery mechanism
+for operators who run more than one endpoint, and a per-model performance
+catalog so an agent can answer "what tokens-per-second should I expect on n300
+for this model?" without running `benchmark` itself.
 
 ---
 
